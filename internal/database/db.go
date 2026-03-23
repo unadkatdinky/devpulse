@@ -73,9 +73,9 @@ func Migrate(db *gorm.DB) {
 	log.Println("Running migrations...")
 
 	err := db.AutoMigrate(
-		&models.User{},
-		// We'll add Event, Repository models here on Day 3
-	)
+    &models.User{},
+    &models.GitHubEvent{}, // ← add this line
+)
 
 	if err != nil {
 		log.Fatal("❌ Migration failed: ", err)
