@@ -39,65 +39,133 @@
 // 	return defaultValue
 // }
 
+// package config
+
+// import (
+// 	"log"
+// 	"os"
+
+// 	"github.com/joho/godotenv"
+// )
+
+// // Config holds every setting the app needs
+// // Built once at startup from environment variables
+// // Passed around to everything that needs it — no global variables
+// type Config struct {
+// 	// Server
+// 	AppPort string
+// 	AppEnv  string
+
+// 	// Database
+// 	DBHost     string
+// 	DBPort     string
+// 	DBUser     string
+// 	DBPassword string
+// 	DBName     string
+// 	DBSSLMode  string
+
+// 	// JWT
+// 	JWTSecret      string
+// 	JWTExpiryHours string
+// }
+
+// func Load() *Config {
+// 	// Load .env file
+// 	// In production (Railway, Render, Fly.io) env vars are injected directly
+// 	// godotenv just reads them from a file for local development
+// 	// If no .env file exists it logs a warning and continues — doesn't crash
+// 	if err := godotenv.Load(); err != nil {
+// 		log.Println("No .env file found, reading from environment variables")
+// 	}
+
+// 	return &Config{
+// 		AppPort: getEnv("APP_PORT", "8080"),
+// 		AppEnv:  getEnv("APP_ENV", "development"),
+
+// 		DBHost:     getEnv("DB_HOST", "localhost"),
+// 		DBPort:     getEnv("DB_PORT", "5432"),
+// 		DBUser:     getEnv("DB_USER", "postgres"),
+// 		DBPassword: getEnv("DB_PASSWORD", ""),
+// 		DBName:     getEnv("DB_NAME", "devpulse"),
+// 		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
+
+// 		JWTSecret:      getEnv("JWT_SECRET", ""),
+// 		JWTExpiryHours: getEnv("JWT_EXPIRY_HOURS", "24"),
+// 	}
+// }
+
+// // getEnv returns the env var value or a default if not set
+// func getEnv(key, defaultValue string) string {
+// 	if value := os.Getenv(key); value != "" {
+// 		return value
+// 	}
+// 	return defaultValue
+// }
+
 package config
 
 import (
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
 
-// Config holds every setting the app needs
-// Built once at startup from environment variables
-// Passed around to everything that needs it — no global variables
 type Config struct {
-	// Server
-	AppPort string
-	AppEnv  string
-
 	// Database
 	DBHost     string
 	DBPort     string
 	DBUser     string
 	DBPassword string
 	DBName     string
-	DBSSLMode  string
 
-	// JWT
-	JWTSecret      string
-	JWTExpiryHours string
+	// Server
+	Port string
+
+	// Auth
+	JWTSecret string
+
+	// GitHub
+	GitHubWebhookSecret string
+
+	// Worker
+	WorkerPoolSize int
+
+	AppEnv    string
+	DBSSLMode string
 }
 
 func Load() *Config {
-	// Load .env file
-	// In production (Railway, Render, Fly.io) env vars are injected directly
-	// godotenv just reads them from a file for local development
-	// If no .env file exists it logs a warning and continues — doesn't crash
+	// Load .env file — if it doesn't exist (e.g. on Railway), that's fine,
+	// Railway injects env vars directly
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, reading from environment variables")
+		log.Println("No .env file found — reading from environment")
+	}
+
+	workerPoolSize, err := strconv.Atoi(getEnv("WORKER_POOL_SIZE", "5"))
+	if err != nil {
+		workerPoolSize = 5
 	}
 
 	return &Config{
-		AppPort: getEnv("APP_PORT", "8080"),
-		AppEnv:  getEnv("APP_ENV", "development"),
-
-		DBHost:     getEnv("DB_HOST", "localhost"),
-		DBPort:     getEnv("DB_PORT", "5432"),
-		DBUser:     getEnv("DB_USER", "postgres"),
-		DBPassword: getEnv("DB_PASSWORD", ""),
-		DBName:     getEnv("DB_NAME", "devpulse"),
-		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
-
-		JWTSecret:      getEnv("JWT_SECRET", ""),
-		JWTExpiryHours: getEnv("JWT_EXPIRY_HOURS", "24"),
+		DBHost:              getEnv("DB_HOST", "localhost"),
+		DBPort:              getEnv("DB_PORT", "5432"),
+		DBUser:              getEnv("DB_USER", "postgres"),
+		DBPassword:          getEnv("DB_PASSWORD", ""),
+		DBName:              getEnv("DB_NAME", "devpulse"),
+		Port:                getEnv("PORT", "8080"),
+		JWTSecret:           getEnv("JWT_SECRET", ""),
+		GitHubWebhookSecret: getEnv("GITHUB_WEBHOOK_SECRET", ""),
+		WorkerPoolSize:      workerPoolSize,
+		AppEnv:    getEnv("APP_ENV", "development"),
+		DBSSLMode: getEnv("DB_SSL_MODE", "disable"),
 	}
 }
 
-// getEnv returns the env var value or a default if not set
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
-	return defaultValue
+	return fallback
 }

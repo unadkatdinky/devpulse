@@ -117,67 +117,139 @@
 // 	log.Fatal(http.ListenAndServe(addr, loggedMux))
 // } 
 
+// package main
+
+// import (
+// 	"fmt"
+// 	"log"
+// 	"net/http"
+// 	"strconv"
+
+// 	"github.com/unadkatdinky/devpulse/internal/config"
+// 	"github.com/unadkatdinky/devpulse/internal/database"
+// 	"github.com/unadkatdinky/devpulse/internal/handlers"
+// 	"github.com/unadkatdinky/devpulse/internal/middleware"
+// 	"github.com/unadkatdinky/devpulse/internal/repository"
+// )
+
+// func main() {
+// 	// ── 1. Config ─────────────────────────────────────────────────────────────
+// 	cfg := config.Load()
+
+// 	// ── 2. Database ───────────────────────────────────────────────────────────
+// 	db := database.Connect(cfg)
+// 	database.Migrate(db)
+
+// 	// ── 3. Repositories ───────────────────────────────────────────────────────
+// 	// Repositories are the only things that talk to the database
+// 	userRepo := repository.NewUserRepository(db)
+
+// 	// ── 4. Parse JWT expiry ───────────────────────────────────────────────────
+// 	jwtExpiry, err := strconv.Atoi(cfg.JWTExpiryHours)
+// 	if err != nil {
+// 		jwtExpiry = 24 // default to 24 hours if parsing fails
+// 	}
+
+// 	// ── 5. Handlers ───────────────────────────────────────────────────────────
+// 	// Handlers receive their dependencies — they don't create them
+// 	authHandler := handlers.NewAuthHandler(userRepo, cfg.JWTSecret, jwtExpiry)
+
+// 	// ── 6. Router ─────────────────────────────────────────────────────────────
+// 	mux := http.NewServeMux()
+
+// 	// Public routes — no token needed
+// 	mux.HandleFunc("/health", handlers.HealthHandler)
+// 	mux.HandleFunc("/auth/register", authHandler.Register)
+// 	mux.HandleFunc("/auth/login", authHandler.Login)
+
+// 	// Protected routes — will require JWT from Day 3 onwards
+// 	mux.HandleFunc("/api/events", handlers.EventsHandler)
+
+// 	// ── 7. Middleware ─────────────────────────────────────────────────────────
+// 	loggedMux := middleware.Logger(mux)
+
+// 	// ── 8. Start ──────────────────────────────────────────────────────────────
+// 	addr := ":" + cfg.AppPort
+// 	fmt.Printf("\n🚀 DevPulse running on http://localhost%s\n\n", addr)
+// 	fmt.Println("  Public routes:")
+// 	fmt.Println("  POST /auth/register   → create account")
+// 	fmt.Println("  POST /auth/login      → login, get token")
+// 	fmt.Println("  GET  /health          → health check")
+// 	fmt.Println("\n  Protected routes (token required from Day 3):")
+// 	fmt.Println("  GET  /api/events      → list events")
+// 	fmt.Println()
+
+// 	log.Fatal(http.ListenAndServe(addr, loggedMux))
+// }
+
 package main
 
 import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/unadkatdinky/devpulse/internal/config"
 	"github.com/unadkatdinky/devpulse/internal/database"
 	"github.com/unadkatdinky/devpulse/internal/handlers"
 	"github.com/unadkatdinky/devpulse/internal/middleware"
+	// "github.com/unadkatdinky/devpulse/internal/models"
+	"github.com/unadkatdinky/devpulse/internal/worker"
 	"github.com/unadkatdinky/devpulse/internal/repository"
+
 )
 
 func main() {
-	// ── 1. Config ─────────────────────────────────────────────────────────────
+	// Load configuration from .env
 	cfg := config.Load()
 
-	// ── 2. Database ───────────────────────────────────────────────────────────
+	// Connect to PostgreSQL
 	db := database.Connect(cfg)
+	
+
+	// Auto-migrate all models.
+	// Adding GitHubEvent here means GORM will create the github_events
+	// table automatically if it doesn't exist yet.
+	// It will also add any new columns you add to the struct in the future.
 	database.Migrate(db)
 
-	// ── 3. Repositories ───────────────────────────────────────────────────────
-	// Repositories are the only things that talk to the database
+	// Create and start the worker pool.
+	// We do this before registering routes so workers are ready
+	// before any requests can arrive.
+	pool := worker.New(db, cfg.WorkerPoolSize)
+	pool.Start()
+	log.Printf("Worker pool started with %d workers", cfg.WorkerPoolSize)
+
+	// Create handlers — passing in their dependencies.
 	userRepo := repository.NewUserRepository(db)
+	authHandler := handlers.NewAuthHandler(userRepo, cfg.JWTSecret, 24)
+	webhookHandler := handlers.NewWebhookHandler(db, pool, cfg.GitHubWebhookSecret)
 
-	// ── 4. Parse JWT expiry ───────────────────────────────────────────────────
-	jwtExpiry, err := strconv.Atoi(cfg.JWTExpiryHours)
-	if err != nil {
-		jwtExpiry = 24 // default to 24 hours if parsing fails
-	}
-
-	// ── 5. Handlers ───────────────────────────────────────────────────────────
-	// Handlers receive their dependencies — they don't create them
-	authHandler := handlers.NewAuthHandler(userRepo, cfg.JWTSecret, jwtExpiry)
-
-	// ── 6. Router ─────────────────────────────────────────────────────────────
+	// Create the router (ServeMux is Go's built-in URL router).
 	mux := http.NewServeMux()
 
-	// Public routes — no token needed
-	mux.HandleFunc("/health", handlers.HealthHandler)
-	mux.HandleFunc("/auth/register", authHandler.Register)
-	mux.HandleFunc("/auth/login", authHandler.Login)
+	// Health check — useful for Railway and debugging.
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status":"ok","version":"day3"}`)
+	})
 
-	// Protected routes — will require JWT from Day 3 onwards
-	mux.HandleFunc("/api/events", handlers.EventsHandler)
+	// Auth routes from Day 2.
+	mux.HandleFunc("POST /auth/register", authHandler.Register)
+	mux.HandleFunc("POST /auth/login", authHandler.Login)
 
-	// ── 7. Middleware ─────────────────────────────────────────────────────────
-	loggedMux := middleware.Logger(mux)
+	// Webhook route — GitHub will POST to this URL.
+	// No auth middleware here — GitHub doesn't send JWT tokens.
+	// Security is handled by HMAC signature verification instead.
+	mux.HandleFunc("POST /webhooks/github", webhookHandler.HandleGitHubWebhook)
 
-	// ── 8. Start ──────────────────────────────────────────────────────────────
-	addr := ":" + cfg.AppPort
-	fmt.Printf("\n🚀 DevPulse running on http://localhost%s\n\n", addr)
-	fmt.Println("  Public routes:")
-	fmt.Println("  POST /auth/register   → create account")
-	fmt.Println("  POST /auth/login      → login, get token")
-	fmt.Println("  GET  /health          → health check")
-	fmt.Println("\n  Protected routes (token required from Day 3):")
-	fmt.Println("  GET  /api/events      → list events")
-	fmt.Println()
+	// Wrap the entire router with your logging middleware from Day 1.
+	handler := middleware.Logger(mux)
 
-	log.Fatal(http.ListenAndServe(addr, loggedMux))
+	// Start the server.
+	addr := fmt.Sprintf(":%s", cfg.Port)
+	log.Printf("DevPulse server running on %s", addr)
+	if err := http.ListenAndServe(addr, handler); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
 }
