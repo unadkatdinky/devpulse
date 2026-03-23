@@ -89,30 +89,95 @@
 // 	log.Fatal(http.ListenAndServe(":8080", loggedMux))
 // }
 
+// package main
+
+// import (
+// 	"fmt"
+// 	"log"
+// 	"net/http"
+
+// 	"github.com/unadkatdinky/devpulse/internal/config"
+// 	"github.com/unadkatdinky/devpulse/internal/handlers"
+// 	"github.com/unadkatdinky/devpulse/internal/middleware"
+// )
+
+// func main() {
+// 	// Load config FIRST — before anything else
+// 	cfg := config.Load()
+
+// 	mux := http.NewServeMux()
+// 	mux.HandleFunc("/health", handlers.HealthHandler)
+// 	mux.HandleFunc("/api/events", handlers.EventsHandler)
+
+// 	loggedMux := middleware.Logger(mux)
+
+// 	addr := ":" + cfg.AppPort
+// 	fmt.Printf("🚀 DevPulse server running on http://localhost%s (env: %s)\n", addr, cfg.AppEnv)
+
+// 	log.Fatal(http.ListenAndServe(addr, loggedMux))
+// } 
+
 package main
 
 import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/unadkatdinky/devpulse/internal/config"
+	"github.com/unadkatdinky/devpulse/internal/database"
 	"github.com/unadkatdinky/devpulse/internal/handlers"
 	"github.com/unadkatdinky/devpulse/internal/middleware"
+	"github.com/unadkatdinky/devpulse/internal/repository"
 )
 
 func main() {
-	// Load config FIRST — before anything else
+	// ── 1. Config ─────────────────────────────────────────────────────────────
 	cfg := config.Load()
 
+	// ── 2. Database ───────────────────────────────────────────────────────────
+	db := database.Connect(cfg)
+	database.Migrate(db)
+
+	// ── 3. Repositories ───────────────────────────────────────────────────────
+	// Repositories are the only things that talk to the database
+	userRepo := repository.NewUserRepository(db)
+
+	// ── 4. Parse JWT expiry ───────────────────────────────────────────────────
+	jwtExpiry, err := strconv.Atoi(cfg.JWTExpiryHours)
+	if err != nil {
+		jwtExpiry = 24 // default to 24 hours if parsing fails
+	}
+
+	// ── 5. Handlers ───────────────────────────────────────────────────────────
+	// Handlers receive their dependencies — they don't create them
+	authHandler := handlers.NewAuthHandler(userRepo, cfg.JWTSecret, jwtExpiry)
+
+	// ── 6. Router ─────────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
+
+	// Public routes — no token needed
 	mux.HandleFunc("/health", handlers.HealthHandler)
+	mux.HandleFunc("/auth/register", authHandler.Register)
+	mux.HandleFunc("/auth/login", authHandler.Login)
+
+	// Protected routes — will require JWT from Day 3 onwards
 	mux.HandleFunc("/api/events", handlers.EventsHandler)
 
+	// ── 7. Middleware ─────────────────────────────────────────────────────────
 	loggedMux := middleware.Logger(mux)
 
+	// ── 8. Start ──────────────────────────────────────────────────────────────
 	addr := ":" + cfg.AppPort
-	fmt.Printf("🚀 DevPulse server running on http://localhost%s (env: %s)\n", addr, cfg.AppEnv)
+	fmt.Printf("\n🚀 DevPulse running on http://localhost%s\n\n", addr)
+	fmt.Println("  Public routes:")
+	fmt.Println("  POST /auth/register   → create account")
+	fmt.Println("  POST /auth/login      → login, get token")
+	fmt.Println("  GET  /health          → health check")
+	fmt.Println("\n  Protected routes (token required from Day 3):")
+	fmt.Println("  GET  /api/events      → list events")
+	fmt.Println()
 
 	log.Fatal(http.ListenAndServe(addr, loggedMux))
-} 
+}
