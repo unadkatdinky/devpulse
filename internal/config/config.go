@@ -102,6 +102,74 @@
 // 	return defaultValue
 // }
 
+// package config
+
+// import (
+// 	"log"
+// 	"os"
+// 	"strconv"
+
+// 	"github.com/joho/godotenv"
+// )
+
+// type Config struct {
+// 	// Database
+// 	DBHost     string
+// 	DBPort     string
+// 	DBUser     string
+// 	DBPassword string
+// 	DBName     string
+
+// 	// Server
+// 	Port string
+
+// 	// Auth
+// 	JWTSecret string
+
+// 	// GitHub
+// 	GitHubWebhookSecret string
+
+// 	// Worker
+// 	WorkerPoolSize int
+
+// 	AppEnv    string
+// 	DBSSLMode string
+// }
+
+// func Load() *Config {
+// 	// Load .env file — if it doesn't exist (e.g. on Railway), that's fine,
+// 	// Railway injects env vars directly
+// 	if err := godotenv.Load(); err != nil {
+// 		log.Println("No .env file found — reading from environment")
+// 	}
+
+// 	workerPoolSize, err := strconv.Atoi(getEnv("WORKER_POOL_SIZE", "5"))
+// 	if err != nil {
+// 		workerPoolSize = 5
+// 	}
+
+// 	return &Config{
+// 		DBHost:              getEnv("DB_HOST", "localhost"),
+// 		DBPort:              getEnv("DB_PORT", "5432"),
+// 		DBUser:              getEnv("DB_USER", "postgres"),
+// 		DBPassword:          getEnv("DB_PASSWORD", ""),
+// 		DBName:              getEnv("DB_NAME", "devpulse"),
+// 		Port:                getEnv("PORT", "8080"),
+// 		JWTSecret:           getEnv("JWT_SECRET", ""),
+// 		GitHubWebhookSecret: getEnv("GITHUB_WEBHOOK_SECRET", ""),
+// 		WorkerPoolSize:      workerPoolSize,
+// 		AppEnv:    getEnv("APP_ENV", "development"),
+// 		DBSSLMode: getEnv("DB_SSL_MODE", "disable"),
+// 	}
+// }
+
+// func getEnv(key, fallback string) string {
+// 	if value, ok := os.LookupEnv(key); ok {
+// 		return value
+// 	}
+// 	return fallback
+// }
+
 package config
 
 import (
@@ -119,6 +187,8 @@ type Config struct {
 	DBUser     string
 	DBPassword string
 	DBName     string
+	DBSSLMode  string
+	AppEnv     string
 
 	// Server
 	Port string
@@ -132,13 +202,18 @@ type Config struct {
 	// Worker
 	WorkerPoolSize int
 
-	AppEnv    string
-	DBSSLMode string
+	// Redis
+	RedisHost     string
+	RedisPort     string
+	RedisPassword string
+	RedisDB       int
+
+	// Rate limiting
+	RateLimitRequests      int
+	RateLimitWindowSeconds int
 }
 
 func Load() *Config {
-	// Load .env file — if it doesn't exist (e.g. on Railway), that's fine,
-	// Railway injects env vars directly
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found — reading from environment")
 	}
@@ -148,18 +223,39 @@ func Load() *Config {
 		workerPoolSize = 5
 	}
 
+	redisDB, err := strconv.Atoi(getEnv("REDIS_DB", "0"))
+	if err != nil {
+		redisDB = 0
+	}
+
+	rateLimitRequests, err := strconv.Atoi(getEnv("RATE_LIMIT_REQUESTS", "5"))
+	if err != nil {
+		rateLimitRequests = 5
+	}
+
+	rateLimitWindow, err := strconv.Atoi(getEnv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+	if err != nil {
+		rateLimitWindow = 60
+	}
+
 	return &Config{
-		DBHost:              getEnv("DB_HOST", "localhost"),
-		DBPort:              getEnv("DB_PORT", "5432"),
-		DBUser:              getEnv("DB_USER", "postgres"),
-		DBPassword:          getEnv("DB_PASSWORD", ""),
-		DBName:              getEnv("DB_NAME", "devpulse"),
-		Port:                getEnv("PORT", "8080"),
-		JWTSecret:           getEnv("JWT_SECRET", ""),
-		GitHubWebhookSecret: getEnv("GITHUB_WEBHOOK_SECRET", ""),
-		WorkerPoolSize:      workerPoolSize,
-		AppEnv:    getEnv("APP_ENV", "development"),
-		DBSSLMode: getEnv("DB_SSL_MODE", "disable"),
+		DBHost:                 getEnv("DB_HOST", "localhost"),
+		DBPort:                 getEnv("DB_PORT", "5432"),
+		DBUser:                 getEnv("DB_USER", "postgres"),
+		DBPassword:             getEnv("DB_PASSWORD", ""),
+		DBName:                 getEnv("DB_NAME", "devpulse"),
+		DBSSLMode:              getEnv("DB_SSL_MODE", "disable"),
+		AppEnv:                 getEnv("APP_ENV", "development"),
+		Port:                   getEnv("PORT", "8080"),
+		JWTSecret:              getEnv("JWT_SECRET", ""),
+		GitHubWebhookSecret:    getEnv("GITHUB_WEBHOOK_SECRET", ""),
+		WorkerPoolSize:         workerPoolSize,
+		RedisHost:              getEnv("REDIS_HOST", "localhost"),
+		RedisPort:              getEnv("REDIS_PORT", "6379"),
+		RedisPassword:          getEnv("REDIS_PASSWORD", ""),
+		RedisDB:                redisDB,
+		RateLimitRequests:      rateLimitRequests,
+		RateLimitWindowSeconds: rateLimitWindow,
 	}
 }
 
