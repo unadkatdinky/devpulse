@@ -1,39 +1,56 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
+	"github.com/unadkatdinky/devpulse/internal/cache"
 	"github.com/unadkatdinky/devpulse/internal/config"
 	"github.com/unadkatdinky/devpulse/internal/database"
 	"github.com/unadkatdinky/devpulse/internal/handlers"
 	"github.com/unadkatdinky/devpulse/internal/middleware"
+	"github.com/unadkatdinky/devpulse/internal/queue"
 	"github.com/unadkatdinky/devpulse/internal/repository"
 	"github.com/unadkatdinky/devpulse/internal/worker"
 )
 
 func main() {
-	// Load configuration from .env
+	// Load config
 	cfg := config.Load()
 
 	// Connect to PostgreSQL
 	db := database.Connect(cfg)
-
-	// Run migrations — creates/updates all tables
 	database.Migrate(db)
 
-	// Start worker pool
-	pool := worker.New(db, cfg.WorkerPoolSize)
-	pool.Start()
+	// Connect to Redis
+	redisClient := cache.Connect(cfg)
 
-	// Create repositories — these are the database layer
+	// Create Redis queue
+	eventQueue := queue.New(redisClient)
+
+	// Create worker processor
+	processor := worker.New(db)
+
+	// Create a context that cancels when the server shuts down.
+	// This is passed to the Redis workers so they know when to stop.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start Redis queue workers
+	eventQueue.StartWorkers(ctx, cfg.WorkerPoolSize, processor.ProcessJob)
+
+	// Create repositories
 	userRepo := repository.NewUserRepository(db)
 	eventRepo := repository.NewEventRepository(db)
 
-	// Create handlers — these are the HTTP layer
+	// Create handlers
 	authHandler := handlers.NewAuthHandler(userRepo, cfg.JWTSecret, 24)
-	webhookHandler := handlers.NewWebhookHandler(db, pool, cfg.GitHubWebhookSecret)
+	webhookHandler := handlers.NewWebhookHandler(db, eventQueue, cfg.GitHubWebhookSecret)
 	dashboardHandler := handlers.NewDashboardHandler(eventRepo)
 
 	// Router
@@ -43,19 +60,22 @@ func main() {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok","version":"day4"}`)
+		fmt.Fprintf(w, `{"status":"ok","version":"day5"}`)
 	})
 
-	// Auth routes — public, no JWT required
-	mux.HandleFunc("POST /auth/register", authHandler.Register)
-	mux.HandleFunc("POST /auth/login", authHandler.Login)
+	// Auth routes — rate limited to 5 requests per minute per IP
+	mux.HandleFunc("POST /auth/register",
+		middleware.RateLimit(authHandler.Register, redisClient,
+			cfg.RateLimitRequests, cfg.RateLimitWindowSeconds))
 
-	// Webhook route — public but HMAC protected
+	mux.HandleFunc("POST /auth/login",
+		middleware.RateLimit(authHandler.Login, redisClient,
+			cfg.RateLimitRequests, cfg.RateLimitWindowSeconds))
+
+	// Webhook route
 	mux.HandleFunc("POST /webhooks/github", webhookHandler.HandleGitHubWebhook)
 
-	// Dashboard routes — protected by JWT middleware
-	// middleware.RequireAuth wraps each handler — the JWT check runs first,
-	// and only if it passes does the actual handler run
+	// Dashboard routes — JWT protected
 	mux.HandleFunc("GET /dashboard/stats",
 		middleware.RequireAuth(dashboardHandler.GetStats, cfg.JWTSecret))
 
@@ -65,12 +85,53 @@ func main() {
 	mux.HandleFunc("GET /dashboard/events/{id}",
 		middleware.RequireAuth(dashboardHandler.GetEventByID, cfg.JWTSecret))
 
-	// Wrap everything with the logger middleware from Day 1
+	// Wrap with logger
 	handler := middleware.Logger(mux)
 
-	addr := fmt.Sprintf(":%s", cfg.Port)
-	log.Printf("DevPulse server running on %s", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	// Create the HTTP server as a variable — this is needed for graceful shutdown.
+	// Previously we just called http.ListenAndServe directly.
+	// Now we need a reference to the server so we can call server.Shutdown() later.
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%s", cfg.Port),
+		Handler: handler,
 	}
+
+	// ── Graceful Shutdown Setup ───────────────────────────────────────────────
+	// signal.NotifyContext creates a context that is cancelled when the OS
+	// sends SIGINT (Ctrl+C) or SIGTERM (what Railway sends when deploying).
+	// This is how your program knows "it's time to stop".
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start the server in a goroutine so it doesn't block.
+	// This lets the main goroutine wait for the shutdown signal below.
+	go func() {
+		log.Printf("DevPulse server running on :%s", cfg.Port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	// Block here until Ctrl+C or SIGTERM is received.
+	<-quit
+	log.Println("Shutdown signal received — shutting down gracefully...")
+
+	// Cancel the worker context — tells Redis workers to stop.
+	cancel()
+
+	// Give in-flight HTTP requests up to 10 seconds to finish.
+	// After 10 seconds, force shutdown.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+
+	// Close Redis connection
+	if err := redisClient.Close(); err != nil {
+		log.Printf("Error closing Redis: %v", err)
+	}
+
+	log.Println("✅ Server exited cleanly")
 }
