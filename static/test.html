@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DevPulse — Live Feed Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 32px;
+    }
+
+    h1 { color: #58a6ff; margin-bottom: 8px; }
+    p.subtitle { color: #8b949e; margin-bottom: 24px; }
+
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .row {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    input {
+      flex: 1;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 12px;
+      color: #c9d1d9;
+      font-size: 14px;
+    }
+
+    button {
+      background: #238636;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    button:hover { background: #2ea043; }
+    button.danger { background: #da3633; }
+    button.danger:hover { background: #f85149; }
+    button.secondary { background: #21262d; border: 1px solid #30363d; }
+    button.secondary:hover { background: #30363d; }
+
+    .status {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .status.connected { background: #1f6feb33; color: #58a6ff; }
+    .status.disconnected { background: #da363333; color: #f85149; }
+    .status.connecting { background: #9e6a0333; color: #d29922; }
+
+    #events {
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    .event {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-left: 3px solid #238636;
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 8px;
+      animation: fadeIn 0.3s ease;
+    }
+
+    .event.system { border-left-color: #58a6ff; }
+    .event.error { border-left-color: #f85149; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .event-type {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #8b949e;
+      margin-bottom: 4px;
+    }
+
+    .event-title {
+      font-size: 14px;
+      color: #c9d1d9;
+      margin-bottom: 4px;
+    }
+
+    .event-meta {
+      font-size: 12px;
+      color: #6e7681;
+    }
+
+    .empty {
+      text-align: center;
+      color: #6e7681;
+      padding: 40px;
+    }
+
+    #stats {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .stat {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px 20px;
+      flex: 1;
+      text-align: center;
+    }
+
+    .stat-value { font-size: 28px; font-weight: 700; color: #58a6ff; }
+    .stat-label { font-size: 12px; color: #8b949e; margin-top: 4px; }
+  </style>
+</head>
+<body>
+
+  <h1>⚡ DevPulse Live Feed</h1>
+  <p class="subtitle">Real-time GitHub event stream via WebSocket</p>
+
+  <div id="stats">
+    <div class="stat">
+      <div class="stat-value" id="stat-received">0</div>
+      <div class="stat-label">Events Received</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-connected">—</div>
+      <div class="stat-label">Connection Status</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value" id="stat-uptime">0s</div>
+      <div class="stat-label">Connected For</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <input type="text" id="token-input" placeholder="Paste your JWT token here..." />
+      <button onclick="connect()">Connect</button>
+      <button class="danger" onclick="disconnect()">Disconnect</button>
+    </div>
+    <div>
+      Status: <span class="status disconnected" id="status-badge">Disconnected</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <strong>Live Events</strong>
+      <button class="secondary" onclick="clearEvents()">Clear</button>
+    </div>
+    <div id="events">
+      <div class="empty" id="empty-msg">
+        Connect and send a webhook to see events appear here in real time
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let ws = null
+    let eventCount = 0
+    let connectedAt = null
+    let uptimeInterval = null
+
+    function connect() {
+      const token = document.getElementById('token-input').value.trim()
+      if (!token) {
+        alert('Paste your JWT token first')
+        return
+      }
+
+      setStatus('connecting', 'Connecting...')
+
+      // Open WebSocket connection with token in query string
+      ws = new WebSocket(`ws://localhost:8080/ws?token=${token}`)
+
+      ws.onopen = () => {
+        connectedAt = Date.now()
+        setStatus('connected', 'Connected')
+        document.getElementById('stat-connected').textContent = '✓'
+        startUptimeCounter()
+        addEvent('system', 'WebSocket connected', 'Listening for GitHub events...')
+      }
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data)
+        handleMessage(msg)
+      }
+
+      ws.onclose = () => {
+        setStatus('disconnected', 'Disconnected')
+        document.getElementById('stat-connected').textContent = '✗'
+        stopUptimeCounter()
+        addEvent('error', 'WebSocket disconnected', 'Connection closed')
+        ws = null
+      }
+
+      ws.onerror = (err) => {
+        console.error('WS error:', err)
+        addEvent('error', 'Connection error', 'Check console for details')
+      }
+    }
+
+    function disconnect() {
+      if (ws) {
+        ws.close()
+      }
+    }
+
+    function handleMessage(msg) {
+      if (msg.type === 'connected') {
+        // Welcome message from server — already handled by onopen
+        return
+      }
+
+      if (msg.type === 'new_event') {
+        const p = msg.payload
+        eventCount++
+        document.getElementById('stat-received').textContent = eventCount
+
+        addEvent(
+          'github',
+          `${p.event_type} — ${p.repo_full_name}`,
+          `by @${p.sender} · delivery: ${p.delivery_id}`
+        )
+      }
+    }
+
+    function addEvent(type, title, meta) {
+      const empty = document.getElementById('empty-msg')
+      if (empty) empty.remove()
+
+      const div = document.createElement('div')
+      div.className = `event ${type === 'system' || type === 'error' ? type : ''}`
+      div.innerHTML = `
+        <div class="event-type">${type}</div>
+        <div class="event-title">${title}</div>
+        <div class="event-meta">${meta} · ${new Date().toLocaleTimeString()}</div>
+      `
+
+      const container = document.getElementById('events')
+      container.insertBefore(div, container.firstChild)
+    }
+
+    function clearEvents() {
+      const container = document.getElementById('events')
+      container.innerHTML = '<div class="empty" id="empty-msg">Events cleared</div>'
+      eventCount = 0
+      document.getElementById('stat-received').textContent = '0'
+    }
+
+    function setStatus(state, text) {
+      const badge = document.getElementById('status-badge')
+      badge.className = `status ${state}`
+      badge.textContent = text
+    }
+
+    function startUptimeCounter() {
+      uptimeInterval = setInterval(() => {
+        const seconds = Math.floor((Date.now() - connectedAt) / 1000)
+        const m = Math.floor(seconds / 60)
+        const s = seconds % 60
+        document.getElementById('stat-uptime').textContent =
+          m > 0 ? `${m}m ${s}s` : `${s}s`
+      }, 1000)
+    }
+
+    function stopUptimeCounter() {
+      clearInterval(uptimeInterval)
+      document.getElementById('stat-uptime').textContent = '0s'
+    }
+  </script>
+
+</body>
+</html>

@@ -179,28 +179,31 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/unadkatdinky/devpulse/internal/hub"
 	"github.com/unadkatdinky/devpulse/internal/models"
 	"github.com/unadkatdinky/devpulse/internal/queue"
 	"gorm.io/gorm"
 )
 
-// WebhookHandler now uses the Redis queue instead of the in-memory worker pool.
+// WebhookHandler now also holds a reference to the hub for broadcasting.
 type WebhookHandler struct {
 	db            *gorm.DB
 	queue         *queue.Queue
 	webhookSecret string
+	hub           *hub.Hub
 }
 
-// NewWebhookHandler creates a WebhookHandler with Redis queue.
-func NewWebhookHandler(db *gorm.DB, q *queue.Queue, secret string) *WebhookHandler {
+// NewWebhookHandler creates a WebhookHandler with Redis queue and hub.
+func NewWebhookHandler(db *gorm.DB, q *queue.Queue, secret string, h *hub.Hub) *WebhookHandler {
 	return &WebhookHandler{
 		db:            db,
 		queue:         q,
 		webhookSecret: secret,
+		hub:           h,
 	}
 }
 
-// HandleGitHubWebhook receives, verifies, saves, and queues webhook events.
+// HandleGitHubWebhook receives, verifies, saves, queues, and broadcasts events.
 func (h *WebhookHandler) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -260,25 +263,34 @@ func (h *WebhookHandler) HandleGitHubWebhook(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Push to Redis queue instead of in-memory channel.
-	// We only store the IDs and metadata — the worker fetches the
-	// full event from PostgreSQL when it processes the job.
+	// Push to Redis queue for background processing.
 	job := queue.EventJob{
 		EventID:      event.ID,
 		EventType:    event.EventType,
 		RepoFullName: event.RepoFullName,
 		DeliveryID:   event.DeliveryID,
 	}
-
 	if err := h.queue.Push(context.Background(), job); err != nil {
-		// Log the error but don't fail the request —
-		// the event is already saved in PostgreSQL.
-		// You could add a retry mechanism here later.
-		log.Printf("Webhook: failed to push job to Redis queue: %v", err)
+		log.Printf("Webhook: failed to push job to Redis: %v", err)
 	}
 
-	log.Printf("Webhook: received and queued event type=%s repo=%s delivery=%s",
-		eventType, partial.Repository.FullName, deliveryID)
+	// Broadcast to all connected WebSocket clients immediately.
+	// This is what makes the frontend update in real time.
+	// We send a summary — not the full payload — to keep messages small.
+	h.hub.Broadcast(hub.Message{
+		Type: "new_event",
+		Payload: map[string]interface{}{
+			"id":             event.ID,
+			"event_type":     event.EventType,
+			"repo_full_name": event.RepoFullName,
+			"sender":         event.Sender,
+			"delivery_id":    event.DeliveryID,
+			"created_at":     event.CreatedAt,
+		},
+	})
+
+	log.Printf("Webhook: received, queued, and broadcast event type=%s repo=%s",
+		eventType, partial.Repository.FullName)
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -293,15 +305,12 @@ func (h *WebhookHandler) verifySignature(body []byte, signature string) bool {
 		log.Println("WARNING: No webhook secret configured — skipping signature check")
 		return true
 	}
-
 	if !strings.HasPrefix(signature, "sha256=") {
 		return false
 	}
 	receivedHash := strings.TrimPrefix(signature, "sha256=")
-
 	mac := hmac.New(sha256.New, []byte(h.webhookSecret))
 	mac.Write(body)
 	expectedHash := hex.EncodeToString(mac.Sum(nil))
-
 	return hmac.Equal([]byte(receivedHash), []byte(expectedHash))
 }
